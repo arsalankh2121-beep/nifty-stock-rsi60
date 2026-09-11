@@ -1,10 +1,25 @@
 import yfinance as yf
 import requests, os, time
 from flask import Flask
+from datetime import datetime
+import pytz
+
 app = Flask(__name__)
 NTFY_TOPIC = os.getenv("NTFY_TOPIC", "avais-stock-rsi60")
+
 ALL_INDICES = {"^NSEI":"NIFTY50","^NSEBANK":"BANK","^CNXAUTO":"AUTO","^CNXIT":"IT","^CNXPHARMA":"PHARMA","^CNXFMCG":"FMCG","^CNXMETAL":"METAL","^CNXREALTY":"REALTY"}
 STOCKS_MAP = {"^NSEI":["RELIANCE.NS","TCS.NS","HDFCBANK.NS","INFY.NS","ICICIBANK.NS"],"^NSEBANK":["HDFCBANK.NS","ICICIBANK.NS","SBIN.NS","KOTAKBANK.NS","AXISBANK.NS"],"^CNXAUTO":["MARUTI.NS","TATAMOTORS.NS","M&M.NS","BAJAJ-AUTO.NS","EICHERMOT.NS"],"^CNXIT":["TCS.NS","INFY.NS","WIPRO.NS","HCLTECH.NS","TECHM.NS"]}
+
+def is_market_open():
+    ist = pytz.timezone('Asia/Kolkata')
+    now = datetime.now(ist)
+    # Monday=0 ... Sunday=6
+    if now.weekday() >= 5: # Saturday Sunday band
+        return False
+    start = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    end = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    return start <= now <= end
+
 def get_rsi(ticker, period, interval):
     try:
         df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
@@ -17,16 +32,25 @@ def get_rsi(ticker, period, interval):
         rsi = 100 - (100 / (1 + rs))
         return float(rsi.iloc[-1])
     except: return 0
+
 def ntfy(msg):
     try: requests.post(f"https://ntfy.sh/{NTFY_TOPIC}", data=msg.encode('utf-8'))
     except: pass
+
 @app.route('/')
 def home():
-    ntfy("STOCK Scanner NEW LIVE")
-    return "NEW STOCK Scanner LIVE"
+    status = "MARKET OPEN - SCANNING" if is_market_open() else "MARKET CLOSED - SLEEPING"
+    return f"Scanner {status} | IST: {datetime.now(pytz.timezone('Asia/Kolkata'))}"
+
 def scanner_loop():
     while True:
+        if not is_market_open():
+            print("Market closed, sleeping 5 min...")
+            time.sleep(300) # 5 min baad check karega
+            continue
+
         for idx_ticker, idx_name in ALL_INDICES.items():
+            if not is_market_open(): break
             rsi_m = get_rsi(idx_ticker, "5y", "1mo")
             rsi_w = get_rsi(idx_ticker, "2y", "1wk")
             if rsi_m > 60 and rsi_w > 60:
@@ -39,6 +63,7 @@ def scanner_loop():
                         if sh > 60 and s15 > 60:
                             ntfy(f"{stock} | {idx_name} M:{sm:.0f} W:{sw:.0f} H:{sh:.0f} 15M:{s15:.0f}")
             time.sleep(1)
-        time.sleep(900)
+        time.sleep(60) # Market time me har 1 min me scan
+
 import threading
 threading.Thread(target=scanner_loop, daemon=True).start()
